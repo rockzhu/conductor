@@ -55,8 +55,8 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 	private Map<String, TaskDef> taskDefCache = new HashMap<>();
 	
 	@Inject
-	public RedisMetadataDAO(DynoProxy dynoClient, ObjectMapper om, Configuration config) {
-		super(dynoClient, om, config);
+	public RedisMetadataDAO(DynoProxy dynoClient, ObjectMapper objectMapper, Configuration config) {
+		super(dynoClient, objectMapper, config);
 		refreshTaskDefs();
 		int cacheRefreshTime = config.getIntProperty("conductor.taskdef.cache.refresh.time.seconds", 60);
 		Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay(()->refreshTaskDefs(), cacheRefreshTime, cacheRefreshTime, TimeUnit.SECONDS);
@@ -80,7 +80,10 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 		Preconditions.checkNotNull(taskDef.getName(), "TaskDef name cannot be null");
 
 		// Store all task def in under one key
-		dynoClient.hset(nsKey(ALL_TASK_DEFS), taskDef.getName(), toJson(taskDef));
+		String payload = toJson(taskDef);
+		dynoClient.hset(nsKey(ALL_TASK_DEFS), taskDef.getName(), payload);
+		recordRedisDaoRequests("storeTaskDef");
+		recordRedisDaoActionSize("storeTaskDef", payload.length());
 		refreshTaskDefs();
 		return taskDef.getName();
 	}
@@ -108,6 +111,8 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 		String taskDefJsonStr = dynoClient.hget(nsKey(ALL_TASK_DEFS), name);
 		if (taskDefJsonStr != null) {
 			taskDef = readValue(taskDefJsonStr, TaskDef.class);
+			recordRedisDaoRequests("getTaskDef");
+			recordRedisDaoActionSize("getTaskDef", taskDefJsonStr.length());
 		}	
 		return taskDef;
 	}
@@ -116,13 +121,17 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 	public List<TaskDef> getAllTaskDefs() {
 		List<TaskDef> allTaskDefs = new LinkedList<TaskDef>();
 
+		recordRedisDaoRequests("getAllTaskDefs");
 		Map<String, String> taskDefs = dynoClient.hgetAll(nsKey(ALL_TASK_DEFS));
+		int size = 0;
 		if (taskDefs.size() > 0) {
 			for (String taskDefJsonStr : taskDefs.values()) {
 				if (taskDefJsonStr != null) {
 					allTaskDefs.add(readValue(taskDefJsonStr, TaskDef.class));
+					size += taskDefJsonStr.length();
 				}
 			}
+			recordRedisDaoActionSize("getAllTaskDefs", size);
 		}
 
 		return allTaskDefs;
@@ -135,6 +144,7 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 		if (!result.equals(1L)) {
 			throw new ApplicationException(Code.NOT_FOUND, "Cannot remove the task - no such task definition");
 		}
+		recordRedisDaoRequests("removeTaskDef");
 		refreshTaskDefs();
 	}
 
@@ -158,9 +168,11 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 		Preconditions.checkNotNull(name, "WorkflowDef name cannot be null");
 		WorkflowDef def = null;
 
-		String wfDefJsonStr = dynoClient.hget(nsKey(WORKFLOW_DEF, name), LATEST);
-		if (wfDefJsonStr != null) {
-			def = readValue(wfDefJsonStr, WorkflowDef.class);
+		String workflowDefJsonString = dynoClient.hget(nsKey(WORKFLOW_DEF, name), LATEST);
+		if (workflowDefJsonString != null) {
+			def = readValue(workflowDefJsonString, WorkflowDef.class);
+			recordRedisDaoRequests("getWorkflowDef");
+			recordRedisDaoActionSize("getWorkflowDef", workflowDefJsonString.length());
 		}
 
 		return def;
@@ -170,13 +182,18 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 		Preconditions.checkNotNull(name, "WorkflowDef name cannot be null");
 		List<WorkflowDef> workflows = new LinkedList<WorkflowDef>();
 
-		Map<String, String> wfs = dynoClient.hgetAll(nsKey(WORKFLOW_DEF, name));
-		for (String key : wfs.keySet()) {
+		recordRedisDaoRequests("getAllWorkflowDefsByName");
+		Map<String, String> workflowDefs = dynoClient.hgetAll(nsKey(WORKFLOW_DEF, name));
+		int size = 0;
+		for (String key : workflowDefs.keySet()) {
 			if (key.equals(LATEST)) {
 				continue;
 			}
-			workflows.add(readValue(wfs.get(key), WorkflowDef.class));
+			String workflowDef = workflowDefs.get(key);
+			workflows.add(readValue(workflowDef, WorkflowDef.class));
+			size += workflowDef.length();
 		}
+		recordRedisDaoActionSize("getAllWorkflowDefsByName", size);
 
 		return workflows;
 	}
@@ -186,18 +203,19 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 		Preconditions.checkNotNull(name, "WorkflowDef name cannot be null");
 		WorkflowDef def = null;
 
-		String wfDefJsonStr = dynoClient.hget(nsKey(WORKFLOW_DEF, name), String.valueOf(version));
-		if (wfDefJsonStr != null) {
-			def = readValue(wfDefJsonStr, WorkflowDef.class);
+		recordRedisDaoRequests("getWorkflowDef");
+		String workflowDefJsonString = dynoClient.hget(nsKey(WORKFLOW_DEF, name), String.valueOf(version));
+		if (workflowDefJsonString != null) {
+			def = readValue(workflowDefJsonString, WorkflowDef.class);
+			recordRedisDaoActionSize("getWorkflowDef", workflowDefJsonString.length());
 		}
-
 		return def;
 	}
 
 	@Override
 	public List<String> findAll() {
 		Set<String> wfNames = dynoClient.smembers(nsKey(WORKFLOW_DEF_NAMES));
-		return wfNames.stream().collect(Collectors.toList());
+		return new ArrayList<>(wfNames);
 	}
 
 	@Override
@@ -205,30 +223,38 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 		List<WorkflowDef> workflows = new LinkedList<WorkflowDef>();
 
 		// Get all from WORKFLOW_DEF_NAMES
+		recordRedisDaoRequests("getAllWorkflowDefs");
 		Set<String> wfNames = dynoClient.smembers(nsKey(WORKFLOW_DEF_NAMES));
+		int size = 0;
 		for (String wfName : wfNames) {
-			Map<String, String> wfs = dynoClient.hgetAll(nsKey(WORKFLOW_DEF, wfName));
-			for (String key : wfs.keySet()) {
+			Map<String, String> workflowDefs = dynoClient.hgetAll(nsKey(WORKFLOW_DEF, wfName));
+			for (String key : workflowDefs.keySet()) {
 				if (key.equals(LATEST)) {
 					continue;
 				}
-				workflows.add(readValue(wfs.get(key), WorkflowDef.class));
+				String workflowDef = workflowDefs.get(key);
+				workflows.add(readValue(workflowDef, WorkflowDef.class));
+				size += workflowDef.length();
 			}
 		}
-
+		recordRedisDaoActionSize("getAllWorkflowDefs", size);
 		return workflows;
 	}
 
 	@Override
 	public List<WorkflowDef> getAllLatest() {
 		List<WorkflowDef> workflows = new LinkedList<WorkflowDef>();
+		int size = 0;
 
 		// Get all from WORKFLOW_DEF_NAMES
-		Set<String> wfNames = dynoClient.smembers(nsKey(WORKFLOW_DEF_NAMES));
-		for (String wfName : wfNames) {
-			String wfDefJsonStr = dynoClient.hget(nsKey(WORKFLOW_DEF, wfName), LATEST);
-			workflows.add(readValue(wfDefJsonStr, WorkflowDef.class));
+		recordRedisDaoRequests("getAllLatestWorkflowDefs");
+		Set<String> workflowNames = dynoClient.smembers(nsKey(WORKFLOW_DEF_NAMES));
+		for (String workflowName : workflowNames) {
+			String workflowDefJsonString = dynoClient.hget(nsKey(WORKFLOW_DEF, workflowName), LATEST);
+			workflows.add(readValue(workflowDefJsonString, WorkflowDef.class));
+			size += workflowDefJsonString.length();
 		}
+		recordRedisDaoActionSize("getAllLatestWorkflowDefs", size);
 
 		return workflows;
 	}
@@ -243,7 +269,7 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 		}
 		index(eventHandler);
 		dynoClient.hset(nsKey(EVENT_HANDLERS), eventHandler.getName(), toJson(eventHandler));
-		
+		recordRedisDaoRequests("addEventHandler");
 	}
 
 	@Override
@@ -255,6 +281,7 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 		}
 		index(eventHandler);
 		dynoClient.hset(nsKey(EVENT_HANDLERS), eventHandler.getName(), toJson(eventHandler));
+		recordRedisDaoRequests("updateEventHandler");
 	}
 
 	@Override
@@ -264,6 +291,7 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 			throw new ApplicationException(Code.NOT_FOUND, "EventHandler with name " + name + " not found!");
 		}
 		dynoClient.hdel(nsKey(EVENT_HANDLERS), name);
+		recordRedisDaoRequests("removeEventHandler");
 		removeIndex(existing);
 	}
 
@@ -276,6 +304,7 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 			EventHandler eh = readValue(json, EventHandler.class);
 			handlers.add(eh);
 		});
+		recordRedisDaoRequests("getAllEventHandlers");
 		return handlers;
 	}
 	
@@ -341,6 +370,6 @@ public class RedisMetadataDAO extends BaseDynoDAO implements MetadataDAO {
 		String latestdata = dynoClient.hget(nsKey(WORKFLOW_DEF, def.getName()), latestKey);
 		dynoClient.hset(nsKey(WORKFLOW_DEF, def.getName()), LATEST, latestdata);
 		dynoClient.sadd(nsKey(WORKFLOW_DEF_NAMES), def.getName());
-
+		recordRedisDaoRequests("storeWorkflowDef");
 	}
 }
