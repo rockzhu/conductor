@@ -39,6 +39,7 @@ subprojects {
     dependencies {
     	testCompile "junit:junit-dep:${revJUnit}"
     	testCompile "org.mockito:mockito-all:${revMockito}"
+        compile 'net.java.dev.jna:jna:4.1.0'
     }
 
     group = "com.netflix.${githubProjectName}"
